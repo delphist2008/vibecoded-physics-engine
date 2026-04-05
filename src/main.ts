@@ -575,6 +575,94 @@ window.addEventListener('keydown', (e)=>{
   }
 });
 
+// --- Scene save / load utilities ---
+function exportSceneJSON(){
+  const out = bodies.map(b => ({
+    localVerts: b.localVerts,
+    pos: b.pos,
+    vel: b.vel,
+    ang: b.ang,
+    angVel: b.angVel,
+    mass: b.mass,
+    color: b.color,
+    isStatic: !!b.isStatic
+  }));
+  return JSON.stringify({ version: 1, bodies: out }, null, 2);
+}
+
+function downloadJSON(filename: string, data: string){
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a);
+  a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importSceneFromJSON(text: string){
+  try{
+    const obj = JSON.parse(text);
+    if (!obj || !Array.isArray(obj.bodies)) throw new Error('Invalid scene file');
+    // clear current bodies and load new ones
+    bodies.length = 0;
+    for (const bb of obj.bodies){
+      const temp: any = {
+        id: nextId++,
+        localVerts: bb.localVerts || [],
+        pos: bb.pos || { x:0,y:0 },
+        vel: bb.vel || { x:0,y:0 },
+        mass: bb.mass || 1,
+        color: bb.color || randomColor(),
+        isStatic: !!bb.isStatic,
+        ang: bb.ang || 0,
+        angVel: bb.angVel || 0
+      };
+      // make sure finalizeBody computes inertia/invMass correctly
+      finalizeBody(temp);
+      // if JSON provided localVerts, keep them; else nothing
+      if (Array.isArray(bb.localVerts) && bb.localVerts.length>0){ temp.localVerts = bb.localVerts; }
+      bodies.push(temp as RBody);
+    }
+    console.debug('scene loaded, bodies=', bodies.length);
+  }catch(err:any){
+    console.error('Failed to import scene', err);
+    alert('Failed to load scene: ' + (err && err.message ? err.message : String(err)));
+  }
+}
+
+// hidden file input used for "Load" button and Ctrl+O
+const __sceneFileInput = document.createElement('input');
+__sceneFileInput.type = 'file';
+__sceneFileInput.accept = 'application/json';
+__sceneFileInput.style.display = 'none';
+__sceneFileInput.addEventListener('change', ()=>{
+  const f = __sceneFileInput.files && __sceneFileInput.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{ if (typeof reader.result === 'string') importSceneFromJSON(reader.result); };
+  reader.readAsText(f);
+});
+document.body.appendChild(__sceneFileInput);
+
+// Wire up common button IDs for Save/Load if they exist in the page
+const saveIds = ['save','saveBtn','save-button','btnSave','save-scene','saveScene'];
+for (const id of saveIds){ const el = document.getElementById(id); if (el) el.addEventListener('click', ()=>{ downloadJSON('scene.json', exportSceneJSON()); }); }
+const loadIds = ['load','loadBtn','load-button','btnLoad','load-scene','loadScene'];
+for (const id of loadIds){ const el = document.getElementById(id); if (el) el.addEventListener('click', ()=>{ __sceneFileInput.value = ''; __sceneFileInput.click(); }); }
+
+// Keyboard shortcuts: Ctrl+S to save, Ctrl+O to open (prevents browser default)
+window.addEventListener('keydown', (e)=>{
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')){
+    e.preventDefault();
+    downloadJSON('scene.json', exportSceneJSON());
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')){
+    e.preventDefault();
+    __sceneFileInput.value = '';
+    __sceneFileInput.click();
+  }
+});
+
 // viewport / camera (world-to-screen mapping)
 let viewOffset: Vec = { x: 0, y: 0 };
 let viewScale = 1;
