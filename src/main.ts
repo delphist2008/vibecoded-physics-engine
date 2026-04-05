@@ -6,6 +6,7 @@ let floorY = window.innerHeight - 80;
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
+  // keep floorY in world coords; if you want adaptive, change here
   floorY = canvas.height - 80;
 }
 window.addEventListener('resize', resize);
@@ -362,8 +363,16 @@ let lastBodiesCount = -1;
 
 // mouse/keyboard handlers (creation, freeform, dragging)
 canvas.addEventListener('mousedown', (e)=>{
+  if (e.button === 1){ // middle click -> start panning
+    isPanning = true;
+    panStartScreen = { x: e.clientX, y: e.clientY };
+    panStartOffset = { x: viewOffset.x, y: viewOffset.y };
+    e.preventDefault();
+    return;
+  }
+  const screenP = { x: e.clientX, y: e.clientY };
+  const p = screenToWorld(screenP);
   if (e.button !== 0) return;
-  const p = {x:e.clientX, y:e.clientY};
   console.debug('mousedown', p, 'ctrl', ctrlDown);
   mouseDown = true;
   startPos = p;
@@ -381,9 +390,7 @@ canvas.addEventListener('mousedown', (e)=>{
     if (pointInPoly(p, wv)){
       draggingBody = b;
       isDragging = true;
-      // store anchor point in body-local coords so we always apply impulse at the original clicked point
       dragLocalAnchor = worldToLocal(b, p);
-      // prevent new-shape creation by clearing startPos
       startPos = null;
       console.debug('start dragging body', b.id);
       return;
@@ -391,30 +398,35 @@ canvas.addEventListener('mousedown', (e)=>{
   }
 });
 
-canvas.addEventListener('mousemove', (e)=>{ currentPos = {x:e.clientX, y:e.clientY}; });
+canvas.addEventListener('mousemove', (e)=>{
+  const screenP = { x: e.clientX, y: e.clientY };
+  if (isPanning && panStartScreen && panStartOffset){
+    viewOffset.x = panStartOffset.x + (screenP.x - panStartScreen.x);
+    viewOffset.y = panStartOffset.y + (screenP.y - panStartScreen.y);
+    return;
+  }
+  currentPos = screenToWorld(screenP);
+});
 
 canvas.addEventListener('mouseup', (e)=>{
+  if (e.button === 1){ isPanning = false; panStartScreen = null; panStartOffset = null; return; }
+  const screenP = { x: e.clientX, y: e.clientY };
+  currentPos = screenToWorld(screenP);
   if (e.button !== 0) return;
   console.debug('mouseup', { mouseDown, startPos, currentPos, isDragging, ctrlDown });
   mouseDown = false;
-  // if we were dragging an existing body, finalize drag and do not create new shape
   if (isDragging) {
-    // apply an impulse based on distance from centroid to cursor so the user "throws" the body
     if (draggingBody && currentPos){
       const b = draggingBody;
-      // compute contact point where the user initially grabbed the body
       const contact = dragLocalAnchor ? localToWorld(b, dragLocalAnchor) : currentPos;
-      // velocity at contact
       const r = { x: contact.x - b.pos.x, y: contact.y - b.pos.y };
       const velAtContact = { x: b.vel.x + (-b.angVel * r.y), y: b.vel.y + (b.angVel * r.x) };
       const dir = { x: currentPos.x - contact.x, y: currentPos.y - contact.y };
       const dist = Math.hypot(dir.x, dir.y);
       if (dist > 1e-3){
-        // desired velocity for the contact point proportional to cursor offset
-        const k = 6; // strength factor
+        const k = 6;
         const desiredVel = { x: dir.x * k, y: dir.y * k };
         const impulse = { x: (desiredVel.x - velAtContact.x) * (b.mass), y: (desiredVel.y - velAtContact.y) * (b.mass) };
-        // apply at the contact point to induce rotation
         applyImpulse(b, impulse, contact);
         console.debug('applied drag impulse to', b.id, 'impulse=', impulse);
       }
@@ -428,7 +440,6 @@ canvas.addEventListener('mouseup', (e)=>{
   }
   if (!startPos || !currentPos) return;
   if (draggingBody) { draggingBody = null; startPos = null; return; }
-
   if (ctrlDown){ startPos = null; return; }
 
   // create regular polygon using previewSides and angle from cursor
@@ -447,20 +458,31 @@ canvas.addEventListener('mouseup', (e)=>{
   finalizeBody(temp);
   bodies.push(temp as RBody);
   console.debug('created body', temp.id, 'verts', temp.localVerts.length);
-  // diagnostic: show bodies length and whether the global reference matches
   console.debug('after push: bodies.length=', bodies.length, 'global same?', (window as any).__bodies === bodies);
   startPos = null;
 });
 
-// wheel to change number of sides when creating a regular polygon
+// wheel: when creating (mouseDown) change sides; otherwise zoom viewport
 canvas.addEventListener('wheel', (e)=>{
-  if (!mouseDown) return; // only while dragging to create
-  if (isDragging) return;
-  if (ctrlDown) return;
-  e.preventDefault();
-  const delta = Math.sign(e.deltaY);
-  if (delta < 0) previewSides = Math.min(12, previewSides + 1);
-  else previewSides = Math.max(3, previewSides - 1);
+  if (mouseDown && !isDragging && !ctrlDown){
+    e.preventDefault();
+    const delta = Math.sign(e.deltaY);
+    if (delta < 0) previewSides = Math.min(12, previewSides + 1);
+    else previewSides = Math.max(3, previewSides - 1);
+    return;
+  }
+  // zoom when not creating
+  if (!mouseDown){
+    const screen = { x: e.clientX, y: e.clientY };
+    const before = screenToWorld(screen);
+    const scaleFactor = Math.exp(-e.deltaY * 0.0015); // smooth
+    const newScale = Math.max(0.1, Math.min(5, viewScale * scaleFactor));
+    viewScale = newScale;
+    // adjust offset so the point under cursor remains under cursor
+    const after = before; // world coordinate stays same
+    viewOffset.x = screen.x - after.x * viewScale;
+    viewOffset.y = screen.y - after.y * viewScale;
+  }
 });
 
 // track ctrl key globally so we can finalize on release
@@ -552,6 +574,16 @@ window.addEventListener('keydown', (e)=>{
     debugDraw = !debugDraw; console.debug('debugDraw=', debugDraw);
   }
 });
+
+// viewport / camera (world-to-screen mapping)
+let viewOffset: Vec = { x: 0, y: 0 };
+let viewScale = 1;
+function screenToWorld(p: Vec){ return { x: (p.x - viewOffset.x) / viewScale, y: (p.y - viewOffset.y) / viewScale }; }
+function worldToScreen(p: Vec){ return { x: p.x * viewScale + viewOffset.x, y: p.y * viewScale + viewOffset.y }; }
+// panning state
+let isPanning = false;
+let panStartScreen: Vec | null = null;
+let panStartOffset: Vec | null = null;
 
 // main loop state for FPS/HUD
 let last = performance.now();
@@ -674,12 +706,16 @@ function step(ts:number){
 
   // render
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  // background
+  // apply view transform
+  ctx.save();
+  ctx.setTransform(viewScale, 0, 0, viewScale, viewOffset.x, viewOffset.y);
+
+  // background (world-space)
   ctx.fillStyle = '#aee1ff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  // floor
+  // floor (world-space)
   ctx.fillStyle = '#6aa84f'; ctx.fillRect(0,floorY,canvas.width,canvas.height-floorY);
 
-  // draw bodies
+  // draw bodies (world-space)
   const mousePos = currentPos;
 
   // compute hovered body
@@ -706,9 +742,18 @@ function step(ts:number){
     if (mousePos && pointInPoly(mousePos, wv)){
       ctx.lineWidth = 4; ctx.strokeStyle = 'yellow'; ctx.stroke();
     }
+
+    // debug draw: triangulate and draw each body's world-space triangulation when debugDraw is enabled
+    if (debugDraw){
+      if (wv.length >= 3){
+        const tris = earClipTriangulate(wv);
+        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,0,0,0.6)'; ctx.fillStyle = 'rgba(255,0,0,0.06)';
+        for (let t of tris){ ctx.beginPath(); ctx.moveTo(t[0].x,t[0].y); ctx.lineTo(t[1].x,t[1].y); ctx.lineTo(t[2].x,t[2].y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+      }
+    }
+
     // debug draw: show drag impulse vector when this body is being dragged
     if (debugDraw && isDragging && draggingBody === b && currentPos){
-      // compute the impulse that would be applied (same math as in loop)
       const contact = dragLocalAnchor && draggingBody === b ? localToWorld(b, dragLocalAnchor) : { x: b.pos.x, y: b.pos.y };
       const r = { x: contact.x - b.pos.x, y: contact.y - b.pos.y };
       const velAtContact = { x: b.vel.x + (-b.angVel * r.y), y: b.vel.y + (b.angVel * r.x) };
@@ -717,21 +762,20 @@ function step(ts:number){
       const dv = { x: desiredVel.x - velAtContact.x, y: desiredVel.y - velAtContact.y };
       const alpha = 0.15;
       const impulse = { x: dv.x * b.mass * alpha, y: dv.y * b.mass * alpha };
-      drawArrow(ctx, contact, { x: contact.x + impulse.x, y: contact.y + impulse.y }, 'red');
-    }
-
-    // debug: triangulate and draw each body's world-space triangulation when debugDraw is enabled
-    if (debugDraw){
-      const wv = getWorldVerts(b);
-      if (wv.length >= 3){
-        const tris = earClipTriangulate(wv);
-        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,0,0,0.6)'; ctx.fillStyle = 'rgba(255,0,0,0.06)';
-        for (let t of tris){ ctx.beginPath(); ctx.moveTo(t[0].x,t[0].y); ctx.lineTo(t[1].x,t[1].y); ctx.lineTo(t[2].x,t[2].y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
-      }
+      // scale visual length by sqrt(area)
+      const area = Math.abs(polygonArea(wv));
+      const baseArea = 2500; // 50x50
+      const visualScale = Math.sqrt(area / baseArea) || 1;
+      const maxVis = 200;
+      const vis = Math.min(maxVis, Math.sqrt(area));
+      const lenImp = Math.hypot(impulse.x, impulse.y) || 1;
+      const ux = impulse.x / lenImp, uy = impulse.y / lenImp;
+      const arrowEnd = { x: contact.x + ux * vis, y: contact.y + uy * vis };
+      drawArrow(ctx, contact, arrowEnd, 'red');
     }
   }
 
-  // regular preview when creating
+  // regular preview when creating (world-space)
   if (mouseDown && startPos && currentPos && !ctrlDown){
     const center = startPos; const dx = currentPos.x - startPos.x; const dy = currentPos.y - startPos.y;
     const radius = Math.max(10, Math.hypot(dx, dy)); const angle = Math.atan2(dy, dx); const sides = previewSides;
@@ -740,7 +784,7 @@ function step(ts:number){
     ctx.closePath(); ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fill(); ctx.strokeStyle='black'; ctx.stroke();
   }
 
-  // freeform preview
+  // freeform preview (world-space)
   if (ctrlDown && (tempFreeVerts.length>0 || mousePos)){
     ctx.beginPath();
     for (let i=0;i<tempFreeVerts.length;i++){ const v = tempFreeVerts[i]; if (i===0) ctx.moveTo(v.x,v.y); else ctx.lineTo(v.x,v.y); }
@@ -756,13 +800,17 @@ function step(ts:number){
     }
   }
 
-  // HUD
+  // restore to screen-space for HUD and overlays
+  ctx.restore();
+
+  // HUD (screen-space)
   ctx.fillStyle = 'black'; ctx.font='16px Arial'; ctx.textAlign='left'; ctx.textBaseline='top';
   ctx.fillText(`FPS: ${fps}`, 10, 10);
   ctx.fillText(`Bodies: ${bodies.length}`, 10, 30);
   ctx.fillText(`Mode: ${ctrlDown ? 'Freeform' : 'Regular'}`, 10, 50);
   ctx.fillText(`Preview Sides: ${previewSides}`, 10, 70);
-
+  ctx.fillText(`Scale: ${viewScale.toFixed(2)}`, 10, 90);
+  ctx.fillText(`Cam: (${Math.round(viewOffset.x)}, ${Math.round(viewOffset.y)})`, 10, 110);
   // debug draw: normals and penetration
   if (debugDraw && hoveredBody){
     const wv = getWorldVerts(hoveredBody);
