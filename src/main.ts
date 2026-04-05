@@ -130,28 +130,206 @@ function getAxesFromVerts(poly: Vec[]){
   return axes;
 }
 
-// SAT collision detection using world verts
-function polygonCollideSAT(A: RBody, B: RBody){
-  const aVerts = getWorldVerts(A);
-  const bVerts = getWorldVerts(B);
+// SAT collision detection using world verts (updated to support concave polygons via ear-clipping triangulation)
+function pointInTriangle(p: Vec, a: Vec, b: Vec, c: Vec){
+  // barycentric / sign method
+  const v0 = { x: c.x - a.x, y: c.y - a.y };
+  const v1 = { x: b.x - a.x, y: b.y - a.y };
+  const v2 = { x: p.x - a.x, y: p.y - a.y };
+  const dot00 = dot(v0, v0);
+  const dot01 = dot(v0, v1);
+  const dot02 = dot(v0, v2);
+  const dot11 = dot(v1, v1);
+  const dot12 = dot(v1, v2);
+  const invDenom = 1 / (dot00 * dot11 - dot01 * dot01 || 1e-8);
+  const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+  const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+  return u >= 0 && v >= 0 && (u + v) <= 1;
+}
+
+function ensureCCW(poly: Vec[]){
+  if (polygonArea(poly) < 0) return poly.slice().reverse();
+  return poly;
+}
+
+function earClipTriangulate(polyIn: Vec[]){
+  const poly = ensureCCW(polyIn);
+  const n = poly.length;
+  if (n < 3) return [] as Vec[][];
+  if (n === 3) return [[poly[0], poly[1], poly[2]]];
+  const verts = poly.map((p, i)=> ({p, i}));
+  const triangles: Vec[][] = [];
+  let guard = 0;
+  while (verts.length >= 3 && guard++ < 1000){
+    let earFound = false;
+    for (let i=0;i<verts.length;i++){
+      const prev = verts[(i-1+verts.length)%verts.length];
+      const curr = verts[i];
+      const next = verts[(i+1)%verts.length];
+      // check convex
+      const ax = curr.p.x - prev.p.x, ay = curr.p.y - prev.p.y;
+      const bx = next.p.x - curr.p.x, by = next.p.y - curr.p.y;
+      const crossZ = ax*by - ay*bx;
+      if (crossZ <= 0) continue; // not an ear (requires CCW winding)
+      // check no other point inside triangle
+      let anyInside = false;
+      for (let k=0;k<verts.length;k++){
+        if (k===((i-1+verts.length)%verts.length) || k===i || k===((i+1)%verts.length)) continue;
+        if (pointInTriangle(verts[k].p, prev.p, curr.p, next.p)){ anyInside = true; break; }
+      }
+      if (anyInside) continue;
+      // cut the ear
+      triangles.push([prev.p, curr.p, next.p]);
+      verts.splice(i,1);
+      earFound = true;
+      break;
+    }
+    if (!earFound) break; // fallback to avoid infinite loop
+  }
+  // if left with a triangle, add it
+  if (verts.length === 3){ triangles.push([verts[0].p, verts[1].p, verts[2].p]); }
+  return triangles;
+}
+
+function triangleSAT(aVerts: Vec[], bVerts: Vec[]){
   const axes = [...getAxesFromVerts(aVerts), ...getAxesFromVerts(bVerts)];
-  let minOverlap = Infinity; let smallestAxis:Vec|null = null;
+  let minOverlap = Infinity; let smallestAxis: Vec | null = null;
   for (let axis of axes){
     const o = overlapOnAxis(aVerts, bVerts, axis);
-    if (o <= 0) return null; // separating axis
+    if (o <= 0) return null;
     if (o < minOverlap){ minOverlap = o; smallestAxis = axis; }
   }
   if (!smallestAxis) return null;
-  // ensure normal points from A to B
-  const dir = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
-  if (dot(dir, smallestAxis) < 0) { smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y }; }
-  // approximate contact point: average of closest points
-  let minProj = Infinity; let minV:Vec = bVerts[0];
+  // contact point approx: average of closest points
+  let minProj = Infinity; let minV = bVerts[0];
   for (let v of bVerts){ const p = dot(v, smallestAxis); if (p < minProj){ minProj = p; minV = v; } }
-  let maxProj = -Infinity; let maxV:Vec = aVerts[0];
+  let maxProj = -Infinity; let maxV = aVerts[0];
   for (let v of aVerts){ const p = dot(v, smallestAxis); if (p > maxProj){ maxProj = p; maxV = v; } }
   const contact = { x: (minV.x + maxV.x)/2, y: (minV.y + maxV.y)/2 };
+  // ensure normal points from A to B
+  const dir = { x: bVerts[0].x - aVerts[0].x, y: bVerts[0].y - aVerts[0].y };
+  if (dot(dir, smallestAxis) < 0) smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
   return { penetration: minOverlap, normal: smallestAxis, contactPoint: contact };
+}
+
+function segIntersect(p1:Vec,p2:Vec,q1:Vec,q2:Vec){
+  const r = { x: p2.x - p1.x, y: p2.y - p1.y };
+  const s = { x: q2.x - q1.x, y: q2.y - q1.y };
+  const rxs = cross(r,s);
+  const qpx = { x: q1.x - p1.x, y: q1.y - p1.y };
+  const qpxr = cross(qpx, r);
+  if (Math.abs(rxs) < 1e-9){ return null; } // parallel
+  const t = cross(qpx, s) / rxs;
+  const u = qpxr / rxs;
+  if (t >= -1e-8 && t <= 1+1e-8 && u >= -1e-8 && u <= 1+1e-8){
+    return { x: p1.x + t * r.x, y: p1.y + t * r.y };
+  }
+  return null;
+}
+
+function outwardEdgeNormal(a:Vec,b:Vec){
+  // for CCW polygon, outward normal = (edge.y, -edge.x) / len
+  const ex = b.x - a.x, ey = b.y - a.y;
+  const nx = ey, ny = -ex;
+  const L = Math.hypot(nx, ny) || 1;
+  return { x: nx / L, y: ny / L };
+}
+
+function nearestEdgeInfo(poly:Vec[], p:Vec){
+  let best = { dist: Infinity, normal: {x:0,y:0}, a: poly[0], b: poly[1] };
+  for (let i=0;i<poly.length;i++){
+    const a = poly[i]; const b = poly[(i+1)%poly.length];
+    const n = outwardEdgeNormal(a,b);
+    const d = dot({x: p.x - a.x, y: p.y - a.y}, n); // positive outside, negative inside
+    const absd = Math.abs(d);
+    if (absd < best.dist){ best.dist = absd; best.normal = n; best.a = a; best.b = b; }
+  }
+  return best;
+}
+
+function polygonCollideSAT(A: RBody, B: RBody){
+  const aVerts = ensureCCW(getWorldVerts(A));
+  const bVerts = ensureCCW(getWorldVerts(B));
+  const contacts: { point:Vec, normal:Vec, penetration:number }[] = [];
+
+  // edge intersections
+  for (let i=0;i<aVerts.length;i++){
+    const a1 = aVerts[i], a2 = aVerts[(i+1)%aVerts.length];
+    for (let j=0;j<bVerts.length;j++){
+      const b1 = bVerts[j], b2 = bVerts[(j+1)%bVerts.length];
+      const ip = segIntersect(a1,a2,b1,b2);
+      if (ip){
+        const na = outwardEdgeNormal(a1,a2);
+        const nb = outwardEdgeNormal(b1,b2);
+        const n = normalize({ x: (na.x + nb.x)/2, y: (na.y + nb.y)/2 });
+        contacts.push({ point: ip, normal: n, penetration: 0 });
+      }
+    }
+  }
+
+  // vertices of A inside B
+  for (let v of aVerts){
+    if (pointInPoly(v, bVerts)){
+      const info = nearestEdgeInfo(bVerts, v);
+      const penetration = Math.max(0, -dot({x:v.x - info.a.x, y: v.y - info.a.y}, info.normal));
+      contacts.push({ point: v, normal: info.normal, penetration });
+    }
+  }
+  // vertices of B inside A
+  for (let v of bVerts){
+    if (pointInPoly(v, aVerts)){
+      const info = nearestEdgeInfo(aVerts, v);
+      const penetration = Math.max(0, -dot({x:v.x - info.a.x, y: v.y - info.a.y}, info.normal));
+      contacts.push({ point: v, normal: { x: -info.normal.x, y: -info.normal.y }, penetration });
+    }
+  }
+
+  if (contacts.length === 0) return null;
+
+  // ensure each contact normal points from A to B (avoid flipped normals on concave "inside" edges)
+  for (let c of contacts){
+    const toB = { x: B.pos.x - c.point.x, y: B.pos.y - c.point.y };
+    if (dot(toB, c.normal) < 0) { c.normal.x = -c.normal.x; c.normal.y = -c.normal.y; }
+  }
+
+  // weight contacts: intersections small weight, vertex-penetrations weighted by penetration
+  let nSum = { x:0, y:0 }, cpSum = { x:0, y:0 }, wSum = 0;
+  for (let c of contacts){
+    const w = (c.penetration > 0) ? (1 + c.penetration) : 0.5;
+    nSum.x += c.normal.x * w; nSum.y += c.normal.y * w;
+    cpSum.x += c.point.x * w; cpSum.y += c.point.y * w;
+    wSum += w;
+  }
+  if (wSum === 0) return null;
+  const avgN = normalize({ x: nSum.x / wSum, y: nSum.y / wSum });
+  const avgCP = { x: cpSum.x / wSum, y: cpSum.y / wSum };
+
+  // compute penetration conservatively: prefer the smallest positive vertex penetration; if none, measure overlap along avg normal
+  let minPen = Infinity; let anyPen = false;
+  for (let c of contacts){ if (c.penetration > 0){ anyPen = true; if (c.penetration < minPen) minPen = c.penetration; } }
+  let avgPen: number;
+  if (anyPen && isFinite(minPen)){
+    avgPen = Math.max(0.001, minPen);
+  } else {
+    // project both polys onto avgN and use overlap (safer than arbitrary default)
+    const pa = projectPoly(aVerts, avgN);
+    const pb = projectPoly(bVerts, avgN);
+    const overlap = Math.min(pa.max, pb.max) - Math.max(pa.min, pb.min);
+    avgPen = overlap > 0 ? overlap : 0.01;
+  }
+
+  // clamp penetration to avoid huge positional corrections that pull bodies through thin walls
+  const MAX_PEN = 10; // pixels
+  avgPen = Math.min(avgPen, MAX_PEN);
+
+  // ensure normal points from A to B: check direction from contact point to B
+  const toB = { x: B.pos.x - avgCP.x, y: B.pos.y - avgCP.y };
+  if (dot(toB, avgN) < 0) { avgN.x = -avgN.x; avgN.y = -avgN.y; }
+
+  // nudge contact point slightly along the normal to keep it on the surface side
+  const contactPoint = { x: avgCP.x + avgN.x * 1e-3, y: avgCP.y + avgN.y * 1e-3 };
+
+  return { penetration: avgPen, normal: avgN, contactPoint };
 }
 
 function applyImpulse(body: RBody, impulse: Vec, contactPoint: Vec){
