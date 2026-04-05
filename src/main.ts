@@ -219,6 +219,21 @@ canvas.addEventListener('mouseup', (e)=>{
   mouseDown = false;
   // if we were dragging an existing body, finalize drag and do not create new shape
   if (isDragging) {
+    // apply an impulse based on distance from centroid to cursor so the user "throws" the body
+    if (draggingBody && currentPos){
+      const b = draggingBody;
+      const dir = { x: currentPos.x - b.pos.x, y: currentPos.y - b.pos.y };
+      const dist = Math.hypot(dir.x, dir.y);
+      if (dist > 1e-3){
+        // desired velocity proportional to distance (tunable)
+        const k = 6; // strength factor
+        const desiredVel = { x: dir.x * k, y: dir.y * k };
+        const impulse = { x: (desiredVel.x - b.vel.x) * (b.mass), y: (desiredVel.y - b.vel.y) * (b.mass) };
+        // apply at cursor as contact point to induce rotation
+        applyImpulse(b, impulse, currentPos);
+        console.debug('applied drag impulse to', b.id, 'impulse=', impulse);
+      }
+    }
     draggingBody = null;
     isDragging = false;
     startPos = null;
@@ -367,6 +382,17 @@ function step(ts:number){
           }
         }
       }
+    }
+
+    // continuous dragging impulse: while holding mouse on a body, steer it toward the cursor each substep
+    if (isDragging && draggingBody && currentPos){
+      const b = draggingBody;
+      const dir = { x: currentPos.x - b.pos.x, y: currentPos.y - b.pos.y };
+      const desiredVel = { x: dir.x * 6, y: dir.y * 6 }; // tune multiplier for responsiveness
+      const dv = { x: desiredVel.x - b.vel.x, y: desiredVel.y - b.vel.y };
+      const alpha = 0.15; // fraction of velocity error converted into an impulse per substep
+      const impulse = { x: dv.x * b.mass * alpha, y: dv.y * b.mass * alpha };
+      applyImpulse(b, impulse, currentPos);
     }
 
     // body-body collisions: iterative solver (several passes to better resolve manifolds)
