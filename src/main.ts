@@ -819,17 +819,8 @@ function step(ts:number){
   ctx.fillText(`Preview Sides: ${previewSides}`, 10, 70);
   ctx.fillText(`Scale: ${viewScale.toFixed(2)}`, 10, 90);
   ctx.fillText(`Cam: (${Math.round(viewOffset.x)}, ${Math.round(viewOffset.y)})`, 10, 110);
-  // debug draw: normals and penetration
-  if (debugDraw && hoveredBody){
-    const wv = getWorldVerts(hoveredBody);
-    ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
-    for (let v of wv){
-      const info = nearestEdgeInfo(wv, v);
-      const normalEnd = { x: v.x + info.normal.x * 20, y: v.y + info.normal.y * 20 };
-      drawArrow(ctx, v, normalEnd, 'red');
-      ctx.fillStyle = 'red'; ctx.beginPath(); ctx.arc(v.x, v.y, 4, 0, Math.PI*2); ctx.fill();
-    }
-  }
+  // debug: vertex normal arrows removed — they caused incorrect placement during pan/zoom.
+  // The drag impulse arrow (for the body being dragged) is still drawn earlier in world-space when debugDraw is enabled.
 
   // FPS measurement
   frameCount++;
