@@ -710,10 +710,18 @@ function step(ts:number){
   ctx.save();
   ctx.setTransform(viewScale, 0, 0, viewScale, viewOffset.x, viewOffset.y);
 
-  // background (world-space)
-  ctx.fillStyle = '#aee1ff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  // floor (world-space)
-  ctx.fillStyle = '#6aa84f'; ctx.fillRect(0,floorY,canvas.width,canvas.height-floorY);
+  // background (world-space) - fill a large area so it appears infinite
+  const worldLeft = -viewOffset.x / viewScale;
+  const worldTop = -viewOffset.y / viewScale;
+  const worldWidth = canvas.width / viewScale;
+  const worldHeight = canvas.height / viewScale;
+  const padX = worldWidth * 10;
+  const padY = worldHeight * 10;
+  ctx.fillStyle = '#aee1ff';
+  ctx.fillRect(worldLeft - padX, worldTop - padY, worldWidth + padX * 2, worldHeight + padY * 2);
+  // floor (world-space) - draw a very wide/deep strip so it looks infinite horizontally and downward
+  ctx.fillStyle = '#6aa84f';
+  ctx.fillRect(worldLeft - padX, floorY, worldWidth + padX * 2, 1e6);
 
   // draw bodies (world-space)
   const mousePos = currentPos;
