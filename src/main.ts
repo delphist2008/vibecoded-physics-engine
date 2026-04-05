@@ -381,6 +381,8 @@ canvas.addEventListener('mousedown', (e)=>{
     if (pointInPoly(p, wv)){
       draggingBody = b;
       isDragging = true;
+      // store anchor point in body-local coords so we always apply impulse at the original clicked point
+      dragLocalAnchor = worldToLocal(b, p);
       // prevent new-shape creation by clearing startPos
       startPos = null;
       console.debug('start dragging body', b.id);
@@ -400,20 +402,26 @@ canvas.addEventListener('mouseup', (e)=>{
     // apply an impulse based on distance from centroid to cursor so the user "throws" the body
     if (draggingBody && currentPos){
       const b = draggingBody;
-      const dir = { x: currentPos.x - b.pos.x, y: currentPos.y - b.pos.y };
+      // compute contact point where the user initially grabbed the body
+      const contact = dragLocalAnchor ? localToWorld(b, dragLocalAnchor) : currentPos;
+      // velocity at contact
+      const r = { x: contact.x - b.pos.x, y: contact.y - b.pos.y };
+      const velAtContact = { x: b.vel.x + (-b.angVel * r.y), y: b.vel.y + (b.angVel * r.x) };
+      const dir = { x: currentPos.x - contact.x, y: currentPos.y - contact.y };
       const dist = Math.hypot(dir.x, dir.y);
       if (dist > 1e-3){
-        // desired velocity proportional to distance (tunable)
+        // desired velocity for the contact point proportional to cursor offset
         const k = 6; // strength factor
         const desiredVel = { x: dir.x * k, y: dir.y * k };
-        const impulse = { x: (desiredVel.x - b.vel.x) * (b.mass), y: (desiredVel.y - b.vel.y) * (b.mass) };
-        // apply at cursor as contact point to induce rotation
-        applyImpulse(b, impulse, currentPos);
+        const impulse = { x: (desiredVel.x - velAtContact.x) * (b.mass), y: (desiredVel.y - velAtContact.y) * (b.mass) };
+        // apply at the contact point to induce rotation
+        applyImpulse(b, impulse, contact);
         console.debug('applied drag impulse to', b.id, 'impulse=', impulse);
       }
     }
     draggingBody = null;
     isDragging = false;
+    dragLocalAnchor = null;
     startPos = null;
     console.debug('end dragging');
     return;
@@ -499,6 +507,52 @@ window.addEventListener('keydown', (e)=>{
   }
 });
 
+// coordinate helpers: convert between world and body-local coords
+function localToWorld(b: RBody, local: Vec){
+  const s = Math.sin(b.ang), c = Math.cos(b.ang);
+  return { x: b.pos.x + local.x * c - local.y * s, y: b.pos.y + local.x * s + local.y * c };
+}
+function worldToLocal(b: RBody, p: Vec){
+  const dx = p.x - b.pos.x, dy = p.y - b.pos.y;
+  const s = Math.sin(-b.ang), c = Math.cos(-b.ang);
+  return { x: dx * c - dy * s, y: dx * s + dy * c };
+}
+
+// dragging anchor in local coords (so the same material point on the body is used while dragging)
+let dragLocalAnchor: Vec | null = null;
+
+// debug drawing helper: draw arrow from a to b
+function drawArrow(ctx: CanvasRenderingContext2D, a:Vec, b:Vec, color:string='red'){
+  const dx = b.x - a.x, dy = b.y - a.y; const L = Math.hypot(dx,dy) || 1;
+  const ux = dx / L, uy = dy / L;
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  // head
+  const hs = Math.min(12, L*0.2);
+  const hx = b.x - ux*hs, hy = b.y - uy*hs;
+  const left = { x: hx + -uy * (hs*0.5), y: hy + ux * (hs*0.5) };
+  const right = { x: hx + uy * (hs*0.5), y: hy + -ux * (hs*0.5) };
+  ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(left.x,left.y); ctx.lineTo(right.x,right.y); ctx.closePath(); ctx.fillStyle = color; ctx.fill();
+}
+
+// debug toggles
+let debugDraw = false;
+
+// selection: hovered body under mouse
+let hoveredBody: RBody | null = null;
+
+// delete and debug key handlers
+window.addEventListener('keydown', (e)=>{
+  if (e.key === 'x' || e.key === 'X'){
+    if (hoveredBody){
+      const idx = bodies.indexOf(hoveredBody);
+      if (idx !== -1){ bodies.splice(idx,1); console.debug('deleted body', hoveredBody.id); hoveredBody = null; }
+    }
+  }
+  if (e.key === 'd' || e.key === 'D'){
+    debugDraw = !debugDraw; console.debug('debugDraw=', debugDraw);
+  }
+});
+
 // main loop state for FPS/HUD
 let last = performance.now();
 let fps = 0; let frameCount = 0; let fpsLastTime = last;
@@ -565,12 +619,17 @@ function step(ts:number){
     // continuous dragging impulse: while holding mouse on a body, steer it toward the cursor each substep
     if (isDragging && draggingBody && currentPos){
       const b = draggingBody;
-      const dir = { x: currentPos.x - b.pos.x, y: currentPos.y - b.pos.y };
-      const desiredVel = { x: dir.x * 6, y: dir.y * 6 }; // tune multiplier for responsiveness
-      const dv = { x: desiredVel.x - b.vel.x, y: desiredVel.y - b.vel.y };
+      // compute current world-space contact point for the original grabbed material point
+      const contact = dragLocalAnchor ? localToWorld(b, dragLocalAnchor) : currentPos;
+      const r = { x: contact.x - b.pos.x, y: contact.y - b.pos.y };
+      const velAtContact = { x: b.vel.x + (-b.angVel * r.y), y: b.vel.y + (b.angVel * r.x) };
+      // desired velocity for the contact point so it follows the cursor
+      const dir = { x: currentPos.x - contact.x, y: currentPos.y - contact.y };
+      const desiredVel = { x: dir.x * 6, y: dir.y * 6 };
+      const dv = { x: desiredVel.x - velAtContact.x, y: desiredVel.y - velAtContact.y };
       const alpha = 0.15; // fraction of velocity error converted into an impulse per substep
       const impulse = { x: dv.x * b.mass * alpha, y: dv.y * b.mass * alpha };
-      applyImpulse(b, impulse, currentPos);
+      applyImpulse(b, impulse, contact);
     }
 
     // body-body collisions: iterative solver (several passes to better resolve manifolds)
@@ -623,6 +682,12 @@ function step(ts:number){
   // draw bodies
   const mousePos = currentPos;
 
+  // compute hovered body
+  hoveredBody = null;
+  if (mousePos){
+    for (let i=bodies.length-1;i>=0;i--){ const b=bodies[i]; const wv=getWorldVerts(b); if (pointInPoly(mousePos, wv)){ hoveredBody = b; break;} }
+  }
+
   // diagnostic: only log when the bodies count actually changes
   if (bodies.length !== lastBodiesCount){
     console.debug('render sees bodies.length=', bodies.length, 'global same?', (window as any).__bodies === bodies);
@@ -640,6 +705,29 @@ function step(ts:number){
     // hover highlight
     if (mousePos && pointInPoly(mousePos, wv)){
       ctx.lineWidth = 4; ctx.strokeStyle = 'yellow'; ctx.stroke();
+    }
+    // debug draw: show drag impulse vector when this body is being dragged
+    if (debugDraw && isDragging && draggingBody === b && currentPos){
+      // compute the impulse that would be applied (same math as in loop)
+      const contact = dragLocalAnchor && draggingBody === b ? localToWorld(b, dragLocalAnchor) : { x: b.pos.x, y: b.pos.y };
+      const r = { x: contact.x - b.pos.x, y: contact.y - b.pos.y };
+      const velAtContact = { x: b.vel.x + (-b.angVel * r.y), y: b.vel.y + (b.angVel * r.x) };
+      const dir = { x: currentPos.x - contact.x, y: currentPos.y - contact.y };
+      const desiredVel = { x: dir.x * 6, y: dir.y * 6 };
+      const dv = { x: desiredVel.x - velAtContact.x, y: desiredVel.y - velAtContact.y };
+      const alpha = 0.15;
+      const impulse = { x: dv.x * b.mass * alpha, y: dv.y * b.mass * alpha };
+      drawArrow(ctx, contact, { x: contact.x + impulse.x, y: contact.y + impulse.y }, 'red');
+    }
+
+    // debug: triangulate and draw each body's world-space triangulation when debugDraw is enabled
+    if (debugDraw){
+      const wv = getWorldVerts(b);
+      if (wv.length >= 3){
+        const tris = earClipTriangulate(wv);
+        ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,0,0,0.6)'; ctx.fillStyle = 'rgba(255,0,0,0.06)';
+        for (let t of tris){ ctx.beginPath(); ctx.moveTo(t[0].x,t[0].y); ctx.lineTo(t[1].x,t[1].y); ctx.lineTo(t[2].x,t[2].y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+      }
     }
   }
 
@@ -659,6 +747,13 @@ function step(ts:number){
     if (mousePos && tempFreeVerts.length>0) ctx.lineTo(mousePos.x, mousePos.y);
     ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth=2; ctx.stroke();
     for (let v of tempFreeVerts){ ctx.beginPath(); ctx.fillStyle='white'; ctx.arc(v.x,v.y,4,0,Math.PI*2); ctx.fill(); ctx.strokeStyle='black'; ctx.stroke(); }
+
+    // debug: triangulate and draw the temporary freeform polygon decomposition
+    if (debugDraw && tempFreeVerts.length >= 3){
+      const tris = earClipTriangulate(tempFreeVerts);
+      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,0,0,0.8)'; ctx.fillStyle = 'rgba(255,0,0,0.08)';
+      for (let t of tris){ ctx.beginPath(); ctx.moveTo(t[0].x,t[0].y); ctx.lineTo(t[1].x,t[1].y); ctx.lineTo(t[2].x,t[2].y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    }
   }
 
   // HUD
@@ -667,6 +762,18 @@ function step(ts:number){
   ctx.fillText(`Bodies: ${bodies.length}`, 10, 30);
   ctx.fillText(`Mode: ${ctrlDown ? 'Freeform' : 'Regular'}`, 10, 50);
   ctx.fillText(`Preview Sides: ${previewSides}`, 10, 70);
+
+  // debug draw: normals and penetration
+  if (debugDraw && hoveredBody){
+    const wv = getWorldVerts(hoveredBody);
+    ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
+    for (let v of wv){
+      const info = nearestEdgeInfo(wv, v);
+      const normalEnd = { x: v.x + info.normal.x * 20, y: v.y + info.normal.y * 20 };
+      drawArrow(ctx, v, normalEnd, 'red');
+      ctx.fillStyle = 'red'; ctx.beginPath(); ctx.arc(v.x, v.y, 4, 0, Math.PI*2); ctx.fill();
+    }
+  }
 
   // FPS measurement
   frameCount++;
