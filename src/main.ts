@@ -163,6 +163,8 @@ function applyImpulse(body: RBody, impulse: Vec, contactPoint: Vec){
 
 // world and input state (single canonical copy)
 const bodies: RBody[] = [];
+// expose a global reference to help detect shadowing/caching issues at runtime
+;(window as any).__bodies = bodies;
 let nextId = 1;
 const gravity = { x: 0, y: 1000 };
 let mouseDown = false;
@@ -176,6 +178,9 @@ let previewSides = 6;
 
 // Freeform polygon while Ctrl is held
 let tempFreeVerts: Vec[] = [];
+
+// lightweight debug: only log when bodies length changes to avoid flooding the console
+let lastBodiesCount = -1;
 
 // mouse/keyboard handlers (creation, freeform, dragging)
 canvas.addEventListener('mousedown', (e)=>{
@@ -241,6 +246,8 @@ canvas.addEventListener('mouseup', (e)=>{
   finalizeBody(temp);
   bodies.push(temp as RBody);
   console.debug('created body', temp.id, 'verts', temp.localVerts.length);
+  // diagnostic: show bodies length and whether the global reference matches
+  console.debug('after push: bodies.length=', bodies.length, 'global same?', (window as any).__bodies === bodies);
   startPos = null;
 });
 
@@ -275,6 +282,8 @@ window.addEventListener('keyup', (e)=>{
       const temp: any = { id: nextId++, verts, vel:{x:0,y:0}, mass, color: randomColor(), isStatic:false, ang:0, angVel:0 };
       finalizeBody(temp);
       bodies.push(temp as RBody);
+      console.debug('created (freeform) body', temp.id, 'verts', temp.localVerts.length);
+      console.debug('after push (freeform): bodies.length=', bodies.length, 'global same?', (window as any).__bodies === bodies);
     }
     tempFreeVerts = [];
   }
@@ -307,11 +316,11 @@ function step(ts:number){
   last = ts;
 
   // simple adaptive substepping
-  const maxSubsteps = 5;
-  const target = 1/120;
-  let steps = Math.ceil(rawDt / target);
-  steps = Math.max(1, Math.min(maxSubsteps, steps));
-  const dt = rawDt / steps;
+  const maxSubsteps = 8; // allow more substeps for stability
+  const target = 1/240; // smaller target step
+   let steps = Math.ceil(rawDt / target);
+   steps = Math.max(1, Math.min(maxSubsteps, steps));
+   const dt = rawDt / steps;
 
   for (let s=0;s<steps;s++){
     // integrate bodies
@@ -360,82 +369,77 @@ function step(ts:number){
       }
     }
 
-    // body-body collisions
+    // body-body collisions: iterative solver (several passes to better resolve manifolds)
     const restitution = 0.2;
-    for (let i=0;i<bodies.length;i++){
-      for (let k=i+1;k<bodies.length;k++){
-        const A = bodies[i], B = bodies[k];
-        if (A===B) continue;
-        const info = polygonCollideSAT(A,B);
-        if (!info) continue;
-        const n = info.normal; const pen = info.penetration; const p = info.contactPoint;
-        // positional correction
-        const percent = 0.2, slop = 0.01;
-        const invMassSum = A.invMass + B.invMass;
-        if (invMassSum > 0){
-          const corrMag = Math.max(pen - slop, 0) / invMassSum * percent;
-          const corr = { x: n.x * corrMag, y: n.y * corrMag };
-          if (!A.isStatic){ A.pos.x -= corr.x * A.invMass; A.pos.y -= corr.y * A.invMass; }
-          if (!B.isStatic){ B.pos.x += corr.x * B.invMass; B.pos.y += corr.y * B.invMass; }
+    const solverIterations = 4;
+    for (let iter=0; iter<solverIterations; iter++){
+      for (let i=0;i<bodies.length;i++){
+        for (let k=i+1;k<bodies.length;k++){
+          const A = bodies[i], B = bodies[k];
+          if (A===B) continue;
+          const info = polygonCollideSAT(A,B);
+          if (!info) continue;
+          const n = info.normal; const pen = info.penetration; const p = info.contactPoint;
+          // stronger positional correction on first iteration
+          const percent = (iter === 0) ? 0.5 : 0.2; const slop = 0.01;
+          const invMassSum = A.invMass + B.invMass;
+          if (invMassSum > 0){
+            const corrMag = Math.max(pen - slop, 0) / invMassSum * percent;
+            const corr = { x: n.x * corrMag, y: n.y * corrMag };
+            if (!A.isStatic){ A.pos.x -= corr.x * A.invMass; A.pos.y -= corr.y * A.invMass; }
+            if (!B.isStatic){ B.pos.x += corr.x * B.invMass; B.pos.y += corr.y * B.invMass; }
+          }
+          // compute relative velocity at contact
+          const rA = { x: p.x - A.pos.x, y: p.y - A.pos.y };
+          const rB = { x: p.x - B.pos.x, y: p.y - B.pos.y };
+          const vA = { x: A.vel.x + (-A.angVel * rA.y), y: A.vel.y + (A.angVel * rA.x) };
+          const vB = { x: B.vel.x + (-B.angVel * rB.y), y: B.vel.y + (B.angVel * rB.x) };
+          const rv = { x: vB.x - vA.x, y: vB.y - vA.y };
+          const velAlongNormal = dot(rv, n);
+          if (velAlongNormal > 0) continue;
+          const raCrossN = cross(rA, n);
+          const rbCrossN = cross(rB, n);
+          const denom2 = A.invMass + B.invMass + raCrossN*raCrossN * A.invInertia + rbCrossN*rbCrossN * B.invInertia;
+          const j2 = denom2 === 0 ? 0 : -(1 + restitution) * velAlongNormal / denom2;
+          const impulse2 = { x: n.x * j2, y: n.y * j2 };
+          if (!A.isStatic) applyImpulse(A, { x: -impulse2.x, y: -impulse2.y }, p);
+          if (!B.isStatic) applyImpulse(B, impulse2, p);
         }
-        // compute impulse
-        const rA = { x: p.x - A.pos.x, y: p.y - A.pos.y };
-        const rB = { x: p.x - B.pos.x, y: p.y - B.pos.y };
-        const vA = { x: A.vel.x + (-A.angVel * rA.y), y: A.vel.y + (A.angVel * rA.x) };
-        const vB = { x: B.vel.x + (-B.angVel * rB.y), y: B.vel.y + (B.angVel * rB.x) };
-        const rv = { x: vB.x - vA.x, y: vB.y - vA.y };
-        const velAlongNormal = dot(rv, n);
-        if (velAlongNormal > 0) continue;
-        const raCrossN = cross(rA, n);
-        const rbCrossN = cross(rB, n);
-        const denom = A.invMass + B.invMass + raCrossN*raCrossN * A.invInertia + rbCrossN*rbCrossN * B.invInertia;
-        const j = denom === 0 ? 0 : -(1 + restitution) * velAlongNormal / denom;
-        const impulse = { x: n.x * j, y: n.y * j };
-        if (!A.isStatic) applyImpulse(A, { x: -impulse.x, y: -impulse.y }, p);
-        if (!B.isStatic) applyImpulse(B, impulse, p);
-      }
-    }
-
-    // dragging impulse
-    if (draggingBody && currentPos){
-      const body = draggingBody;
-      if (!body.isStatic) {
-        const d = sub(currentPos, body.pos);
-        const force = mul(d, 200);
-        const contact = { x: currentPos.x, y: currentPos.y };
-        // scale impulse by body mass so large bodies respond more
-        const J = mul(force, dt * body.mass);
-        applyImpulse(body, J, contact);
       }
     }
   }
 
-  // HUD fps
-  frameCount++;
-  if (ts - fpsLastTime >= 500){ fps = Math.round(frameCount * 1000 / (ts - fpsLastTime)); frameCount = 0; fpsLastTime = ts; }
-
-  render();
-  requestAnimationFrame(step);
-}
-
-function render(){
+  // render
   ctx.clearRect(0,0,canvas.width,canvas.height);
   // background
   ctx.fillStyle = '#aee1ff'; ctx.fillRect(0,0,canvas.width,canvas.height);
   // floor
   ctx.fillStyle = '#6aa84f'; ctx.fillRect(0,floorY,canvas.width,canvas.height-floorY);
 
-  // bodies
+  // draw bodies
   const mousePos = currentPos;
+
+  // diagnostic: only log when the bodies count actually changes
+  if (bodies.length !== lastBodiesCount){
+    console.debug('render sees bodies.length=', bodies.length, 'global same?', (window as any).__bodies === bodies);
+    lastBodiesCount = bodies.length;
+  }
+
   for (let b of bodies){
     const wv = getWorldVerts(b);
     ctx.beginPath();
     for (let i=0;i<wv.length;i++){ const v = wv[i]; if (i===0) ctx.moveTo(v.x,v.y); else ctx.lineTo(v.x,v.y); }
-    ctx.closePath(); ctx.fillStyle = b.color; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.stroke();
-    if (mousePos && pointInPoly(mousePos, wv)){ ctx.lineWidth = 4; ctx.strokeStyle = 'yellow'; ctx.stroke(); }
+    ctx.closePath();
+    ctx.fillStyle = b.color;
+    ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.stroke();
+    // hover highlight
+    if (mousePos && pointInPoly(mousePos, wv)){
+      ctx.lineWidth = 4; ctx.strokeStyle = 'yellow'; ctx.stroke();
+    }
   }
 
-  // regular preview
+  // regular preview when creating
   if (mouseDown && startPos && currentPos && !ctrlDown){
     const center = startPos; const dx = currentPos.x - startPos.x; const dy = currentPos.y - startPos.y;
     const radius = Math.max(10, Math.hypot(dx, dy)); const angle = Math.atan2(dy, dx); const sides = previewSides;
@@ -459,6 +463,13 @@ function render(){
   ctx.fillText(`Bodies: ${bodies.length}`, 10, 30);
   ctx.fillText(`Mode: ${ctrlDown ? 'Freeform' : 'Regular'}`, 10, 50);
   ctx.fillText(`Preview Sides: ${previewSides}`, 10, 70);
+
+  // FPS measurement
+  frameCount++;
+  if (ts - fpsLastTime >= 500){ fps = Math.round(frameCount * 1000 / (ts - fpsLastTime)); frameCount = 0; fpsLastTime = ts; }
+
+  // schedule next frame
+  requestAnimationFrame(step);
 }
 
 requestAnimationFrame(step);
