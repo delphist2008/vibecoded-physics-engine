@@ -320,7 +320,7 @@ function polygonCollideSAT(A: RBody, B: RBody){
   }
 
   // clamp penetration to avoid huge positional corrections that pull bodies through thin walls
-  const MAX_PEN = 10; // pixels
+  const MAX_PEN = 4; // pixels (reduced from 10)
   avgPen = Math.min(avgPen, MAX_PEN);
 
   // ensure normal points from A to B: check direction from contact point to B
@@ -754,7 +754,7 @@ function step(ts:number){
 
     // body-body collisions: iterative solver (several passes to better resolve manifolds)
     const restitution = 0.2;
-    const solverIterations = 4;
+    const solverIterations = 6;
     for (let iter=0; iter<solverIterations; iter++){
       for (let i=0;i<bodies.length;i++){
         for (let k=i+1;k<bodies.length;k++){
@@ -764,32 +764,53 @@ function step(ts:number){
           if (!info) continue;
           const n = info.normal; const pen = info.penetration; const p = info.contactPoint;
           // stronger positional correction on first iteration
-          const percent = (iter === 0) ? 0.5 : 0.2; const slop = 0.01;
-          const invMassSum = A.invMass + B.invMass;
-          if (invMassSum > 0){
-            const corrMag = Math.max(pen - slop, 0) / invMassSum * percent;
-            const corr = { x: n.x * corrMag, y: n.y * corrMag };
-            if (!A.isStatic){ A.pos.x -= corr.x * A.invMass; A.pos.y -= corr.y * A.invMass; }
-            if (!B.isStatic){ B.pos.x += corr.x * B.invMass; B.pos.y += corr.y * B.invMass; }
-          }
-          // compute relative velocity at contact
-          const rA = { x: p.x - A.pos.x, y: p.y - A.pos.y };
-          const rB = { x: p.x - B.pos.x, y: p.y - B.pos.y };
-          const vA = { x: A.vel.x + (-A.angVel * rA.y), y: A.vel.y + (A.angVel * rA.x) };
-          const vB = { x: B.vel.x + (-B.angVel * rB.y), y: B.vel.y + (B.angVel * rB.x) };
-          const rv = { x: vB.x - vA.x, y: vB.y - vA.y };
-          const velAlongNormal = dot(rv, n);
-          if (velAlongNormal > 0) continue;
-          const raCrossN = cross(rA, n);
-          const rbCrossN = cross(rB, n);
-          const denom2 = A.invMass + B.invMass + raCrossN*raCrossN * A.invInertia + rbCrossN*rbCrossN * B.invInertia;
-          const j2 = denom2 === 0 ? 0 : -(1 + restitution) * velAlongNormal / denom2;
-          const impulse2 = { x: n.x * j2, y: n.y * j2 };
-          if (!A.isStatic) applyImpulse(A, { x: -impulse2.x, y: -impulse2.y }, p);
-          if (!B.isStatic) applyImpulse(B, impulse2, p);
-        }
-      }
-    }
+          //          const percent = (iter === 0) ? 0.5 : 0.2; const slop = 0.01;
+          // limit positional correction to be milder per iteration
+          const percent = (iter === 0) ? 0.25 : 0.12; const slop = 0.01;
+          // clamp maximum correction magnitude per-axis to avoid teleport-like moves
+          const MAX_CORR_PER_ITER = 2; // pixels
+           const invMassSum = A.invMass + B.invMass;
+           if (invMassSum > 0){
+             let corrMag = Math.max(pen - slop, 0) / invMassSum * percent;
+             corrMag = Math.min(corrMag, MAX_CORR_PER_ITER);
+             const corr = { x: n.x * corrMag, y: n.y * corrMag };
+             if (!A.isStatic){ A.pos.x -= corr.x * A.invMass; A.pos.y -= corr.y * A.invMass; }
+             if (!B.isStatic){ B.pos.x += corr.x * B.invMass; B.pos.y += corr.y * B.invMass; }
+           }
+           // compute relative velocity at contact
+           const rA = { x: p.x - A.pos.x, y: p.y - A.pos.y };
+           const rB = { x: p.x - B.pos.x, y: p.y - B.pos.y };
+           const vA = { x: A.vel.x + (-A.angVel * rA.y), y: A.vel.y + (A.angVel * rA.x) };
+           const vB = { x: B.vel.x + (-B.angVel * rB.y), y: B.vel.y + (B.angVel * rB.x) };
+           const rv = { x: vB.x - vA.x, y: vB.y - vA.y };
+           const velAlongNormal = dot(rv, n);
+           if (velAlongNormal > 0) continue;
+           const raCrossN = cross(rA, n);
+           const rbCrossN = cross(rB, n);
+           const denom2 = A.invMass + B.invMass + raCrossN*raCrossN * A.invInertia + rbCrossN*rbCrossN * B.invInertia;
+           const j2 = denom2 === 0 ? 0 : -(1 + restitution) * velAlongNormal / denom2;
+           // apply normal impulse
+           const impulse2 = { x: n.x * j2, y: n.y * j2 };
+           if (!A.isStatic) applyImpulse(A, { x: -impulse2.x, y: -impulse2.y }, p);
+           if (!B.isStatic) applyImpulse(B, impulse2, p);
+           // Coulomb friction: tangential impulse
+           const t = { x: -n.y, y: n.x }; // tangent (unit because n is unit)
+           const vt = dot(rv, t);
+           const raCrossT = cross(rA, t);
+           const rbCrossT = cross(rB, t);
+           const denomT = A.invMass + B.invMass + raCrossT*raCrossT * A.invInertia + rbCrossT*rbCrossT * B.invInertia;
+           let jt = denomT === 0 ? 0 : -vt / denomT;
+           const mu = 0.4; // friction coefficient between bodies
+           // clamp friction by Coulomb's law (use magnitude of normal impulse)
+           const jtMax = Math.abs(j2) * mu;
+           if (jt > jtMax) jt = jtMax; if (jt < -jtMax) jt = -jtMax;
+           if (Math.abs(jt) > 1e-8){
+             if (!A.isStatic) applyImpulse(A, { x: -t.x * jt, y: -t.y * jt }, p);
+             if (!B.isStatic) applyImpulse(B, { x: t.x * jt, y: t.y * jt }, p);
+           }
+         }
+       }
+     }
   }
 
   // render
