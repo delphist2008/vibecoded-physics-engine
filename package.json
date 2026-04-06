@@ -1,11 +1,17 @@
 {
-  "name": "phys-sandbox",
-  "version": "1.0.0",
+  "name": "vibecoded-physics-engine",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "build": "tsc",
-    "start": "tsc --watch"
+    "build": "webpack --mode production",
+    "dev": "webpack serve --mode development --open --hot",
+    "watch": "webpack --watch"
   },
-  "dependencies": {
-    "typescript": "^5.9.3"
+  "devDependencies": {
+    "ts-loader": "^9.4.4",
+    "typescript": "^5.1.6",
+    "webpack": "^5.88.2",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^4.15.1"
   }
 }
